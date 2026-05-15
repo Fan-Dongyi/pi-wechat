@@ -7,6 +7,7 @@ import { formatError, log } from "./log.js";
 import { TargetRouter } from "./router.js";
 import { normalizeWechatMessage, truncateForWechat } from "./wechat.js";
 import { AgentManager } from "./agent-manager.js";
+import { ManagerAgent } from "./manager-agent.js";
 
 const config = loadConfig();
 const router = new TargetRouter(config);
@@ -18,18 +19,19 @@ const clients = new Map(
   config.targets.map((target) => [target.id, new HermesClient(target, config.requestTimeoutMs)]),
 );
 
-const bot = new WeixinBot({
-  onError: (error: unknown) => log("ERROR", formatError(error)),
-});
-
 function getClient(targetId: string) {
   const client = clients.get(targetId);
   if (!client) {
     throw new Error(`Hermes client not found: ${targetId}`);
   }
-
   return client;
 }
+
+const manager = config.managerConfig ? new ManagerAgent(config, getClient) : undefined;
+
+const bot = new WeixinBot({
+  onError: (error: unknown) => log("ERROR", formatError(error)),
+});
 
 log("INFO", config.forceLogin ? "强制重新扫码登录微信..." : "正在登录微信...");
 const creds = await bot.login({ force: config.forceLogin });
@@ -58,25 +60,49 @@ bot.onMessage(async (rawMessage: IncomingMessage) => {
     return;
   }
 
-  // If the target is offline, we should probably warn the user
-  const targetStatus = agentManager.getAllStatuses().find(s => s.target.id === target.id);
-  if (targetStatus && !targetStatus.isOnline) {
-    await bot.reply(rawMessage, `目标 Agent [${target.name || target.id}] 当前离线，无法处理请求。`);
-    return;
-  }
-
-  const client = getClient(target.id);
-  log("INFO", `路由到 Hermes Agent: ${target.name ?? target.id}`);
-
   try {
     await bot.sendTyping(message.userId).catch(() => undefined);
 
-    const response = await client.complete(conversations.buildMessages(target, message, routeKeys));
-    conversations.append(target.id, message.userId, message.text, response);
+    let responseText = "";
 
-    const reply = truncateForWechat(response, config.maxReplyChars);
+    // 1. If user specifically mentioned an agent, route directly to it
+    if (isMention) {
+      log("INFO", `User mentioned agent directly. Routing to: ${target.name ?? target.id}`);
+      
+      const targetStatus = agentManager.getAllStatuses().find(s => s.target.id === target.id);
+      if (targetStatus && !targetStatus.isOnline) {
+        await bot.reply(rawMessage, `目标 Agent [${target.name || target.id}] 当前离线，无法处理请求。`);
+        return;
+      }
+
+      const client = getClient(target.id);
+      responseText = await client.complete(conversations.buildMessages(target, message, routeKeys));
+      conversations.append(target.id, message.userId, message.text, responseText);
+    } 
+    // 2. If no mention and Manager is configured, let Manager handle the complex task
+    else if (manager) {
+      log("INFO", `No direct mention. Handing over to ManagerAgent.`);
+      const onlineAgents = agentManager.getOnlineAgents();
+      
+      // Get conversation history for the manager context
+      // We use a dummy target id "manager" to keep track of user's conversation with the manager
+      const managerTarget = { id: "manager", match: [] } as any;
+      const history = conversations.buildMessages(managerTarget, message, routeKeys).slice(0, -1); // exclude current message
+      
+      responseText = await manager.runLoop(message.text, onlineAgents, history);
+      conversations.append("manager", message.userId, message.text, responseText);
+    } 
+    // 3. Fallback to default router behavior if Manager is not configured
+    else {
+      log("INFO", `Manager not configured. Fallback routing to: ${target.name ?? target.id}`);
+      const client = getClient(target.id);
+      responseText = await client.complete(conversations.buildMessages(target, message, routeKeys));
+      conversations.append(target.id, message.userId, message.text, responseText);
+    }
+
+    const reply = truncateForWechat(responseText, config.maxReplyChars);
     await bot.reply(rawMessage, reply);
-    log("SEND", `to=${message.userId} target=${target.id} chars=${reply.length}`);
+    log("SEND", `to=${message.userId} target=${isMention ? target.id : (manager ? "manager" : target.id)} chars=${reply.length}`);
   } catch (error) {
     const reason = formatError(error);
     log("ERROR", reason);

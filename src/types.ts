@@ -22,6 +22,12 @@ export interface AppConfig {
   maxReplyChars: number;
   requestTimeoutMs: number;
   targets: HermesTarget[];
+  managerConfig?: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    systemPrompt: string;
+  };
 }
 
 export interface WechatMessage {
