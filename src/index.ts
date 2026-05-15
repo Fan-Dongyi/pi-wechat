@@ -19,7 +19,7 @@ const clients = new Map(
 );
 
 const bot = new WeixinBot({
-  onError: (error) => log("ERROR", formatError(error)),
+  onError: (error: unknown) => log("ERROR", formatError(error)),
 });
 
 function getClient(targetId: string) {
