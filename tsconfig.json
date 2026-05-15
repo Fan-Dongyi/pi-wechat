@@ -9,7 +9,11 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@pinixai/weixin-bot": ["node_modules/@pinixai/weixin-bot/src/index.ts"]
+    }
   },
   "include": ["src/**/*.ts"]
 }
